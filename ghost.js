@@ -55,14 +55,14 @@ async function init(notify = () => {}) {
   }
 }
 
-// sends "?<number>" to the checker bot and waits for its result
+// sends "? <number>" to the checker bot and waits for its result
 function check(number) {
   const job = chain.then(async () => {
     if (!ready) throw new Error('NOT_READY');
     return new Promise(async (resolve, reject) => {
       const t = setTimeout(() => { waiter = null; reject(new Error('Checker did not reply in time')); }, 60000);
       waiter = { number, resolve: (r) => { clearTimeout(t); resolve(r); } };
-      try { await client.sendMessage(GHOST, { message: '?' + number }); }
+      try { await client.sendMessage(GHOST, { message: '? ' + number }); }
       catch (e) { clearTimeout(t); waiter = null; reject(e); }
     });
   });
