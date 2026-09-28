@@ -1,20 +1,24 @@
 const fs = require('fs');
 const path = require('path');
 
-const DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-fs.mkdirSync(DIR, { recursive: true });
-const FILE = path.join(DIR, 'db.json');
-
+const FILE = path.join(process.env.DATA_DIR || path.join(__dirname, 'data'), 'db.json');
 let data = { users: {}, tickets: {}, ticketCounter: 0, admins: {} };
-try { data = { ...data, ...JSON.parse(fs.readFileSync(FILE, 'utf8')) }; } catch (_) {}
+
+async function init() {
+  try { data = { ...data, ...JSON.parse(fs.readFileSync(FILE, 'utf8')) }; } catch (_) {}
+}
 
 let timer;
 function save() {
   clearTimeout(timer);
-  timer = setTimeout(() => fs.writeFile(FILE, JSON.stringify(data), () => {}), 500);
+  timer = setTimeout(() => {
+    fs.mkdirSync(path.dirname(FILE), { recursive: true });
+    fs.writeFile(FILE, JSON.stringify(data), () => {});
+  }, 500);
 }
 
 module.exports = {
+  init,
   addUser(u) {
     if (!data.users[u.id]) {
       data.users[u.id] = { name: u.first_name || '', username: u.username || '', joined: Date.now() };

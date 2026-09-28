@@ -1,7 +1,8 @@
 require('dotenv').config();
 const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
-const { checkNumber, cleanNumber } = require('./waCheck');
+const wa = require('./wa');
+const cleanNumber = (s) => String(s).replace(/[^0-9]/g, '');
 const db = require('./db');
 
 const { BOT_TOKEN, RENDER_EXTERNAL_URL, PORT = 3000 } = process.env;
@@ -33,6 +34,7 @@ const addAdminMode = new Set();
 const state = new Map();      // userId -> 'check' | 'support'
 const adminReply = new Map(); // adminId -> ticketId
 const inflight = new Set();
+const cool = new Map();
 
 /* ---------- force join ---------- */
 async function notJoined(userId) {
@@ -178,6 +180,29 @@ bot.command('removeadmin', (ctx) => {
   return ctx.reply(`Removed ${id}.`);
 });
 
+/* ---------- WhatsApp checker link (admin) ---------- */
+bot.command('pair', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const n = cleanNumber(ctx.message.text.split(/\s+/)[1] || '');
+  if (n.length < 8) return ctx.reply('Usage: /pair 2348012345678  (the spare WhatsApp number, with country code)');
+  await ctx.reply('⏳ Requesting pairing code...');
+  try {
+    const code = await wa.pair(n);
+    const pretty = String(code).match(/.{1,4}/g).join('-');
+    return ctx.reply(`🔗 Code: \`${pretty}\`\n\nOn that phone: WhatsApp > Linked devices > Link a device > *Link with phone number instead* > enter the code.`, { parse_mode: 'Markdown' });
+  } catch (e) { return ctx.reply('❌ ' + e.message); }
+});
+bot.command('wastatus', (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const s = wa.status();
+  return ctx.reply(`WhatsApp checker: ${s.ready ? '🟢 online' : s.linked ? '🟡 linked, connecting' : '🔴 not linked (use /pair)'}`);
+});
+bot.command('unpair', async (ctx) => {
+  if (!isOwner(ctx)) return;
+  await wa.unpair();
+  return ctx.reply('Unlinked. Use /pair to link a number again.');
+});
+
 /* ---------- admin tools ---------- */
 bot.command('stats', (ctx) => isAdmin(ctx) && ctx.reply(`👥 Users: ${db.count()}\n🎫 Open tickets: ${db.openTickets()}`));
 
@@ -242,19 +267,23 @@ bot.on('text', async (ctx) => {
   const number = cleanNumber(text);
   if (number.length < 8) return ctx.reply('Send a valid number with country code, e.g. 2348012345678', menu());
   state.delete(uid);
+  const now = Date.now();
+  if (now - (cool.get(uid) || 0) < 4000) return ctx.reply('⏳ Slow down, wait a few seconds.');
+  cool.set(uid, now);
   if (inflight.has(number)) return ctx.reply('Already checking that number, hold on...');
   inflight.add(number);
   const msg = await ctx.reply(`🔎 Checking +${number}...`);
   try {
-    const r = await checkNumber(number);
-    const head = `📞 \`+${number}\`\nStatus: *${r.status}*\n`;
-    const tail = `Checked at: ${stamp()}\n\n_${r.detail}_`;
-    const kb = r.status === 'banned'
+    const r = await wa.check(number);
+    const banned = !r.exists;
+    const head = `📞 \`+${number}\`\nStatus: *${banned ? 'banned / not on WhatsApp' : 'active'}*\n`;
+    const tail = `Checked at: ${stamp()}\n\n_${banned ? 'WhatsApp reports no account for this number (banned or never registered).' : 'This number has an active WhatsApp account.'}_`;
+    const kb = banned
       ? Markup.inlineKeyboard([[Markup.button.callback('📨 Request review', `review_${number}`)], [Markup.button.callback('⬅️ Menu', 'menu')]])
       : Markup.inlineKeyboard([[Markup.button.callback('🔎 Check another', 'check'), Markup.button.callback('⬅️ Menu', 'menu')]]);
     await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, head + tail, { parse_mode: 'Markdown', ...kb });
   } catch (err) {
-    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, `⚠️ Check failed: ${err.message || 'unknown error'}`);
+    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, err.message === 'NOT_LINKED' ? '⚠️ Checker is offline right now. Try again later.' : `⚠️ Check failed: ${err.message || 'unknown error'}`);
   } finally {
     inflight.delete(number);
   }
@@ -264,6 +293,11 @@ bot.catch((err) => console.error('Bot error:', err));
 
 /* ---------- start (webhook on Render, polling locally) ---------- */
 (async () => {
+  await db.init();
+  await wa.init((ev) => {
+    const msg = ev === 'open' ? '🟢 WhatsApp checker is online.' : '🔴 WhatsApp checker was logged out. Use /pair to link again.';
+    allAdmins().forEach((a) => bot.telegram.sendMessage(a, msg).catch(() => {}));
+  });
   if (RENDER_EXTERNAL_URL) {
     const hookPath = `/tg/${BOT_TOKEN.replace(/[^A-Za-z0-9]/g, '').slice(-32)}`;
     const handler = bot.webhookCallback(hookPath);
