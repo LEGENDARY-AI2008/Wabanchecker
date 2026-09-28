@@ -27,6 +27,11 @@ const FORCE = (process.env.FORCE_JOIN || '')
   });
 
 const bot = new Telegraf(BOT_TOKEN);
+
+// coloured buttons (Bot API 9.4+): style = 'primary' (blue) | 'success' (green) | 'danger' (red)
+const cb = (text, data, style) => ({ text, callback_data: data, ...(style ? { style } : {}) });
+const link = (text, url, style) => ({ text, url, ...(style ? { style } : {}) });
+const kbd = (rows) => ({ reply_markup: { inline_keyboard: rows } });
 const isAdminId = (id) => ADMIN_IDS.includes(String(id)) || db.isAdmin(id);
 const isAdmin = (ctx) => isAdminId(ctx.from?.id);
 const isOwner = (ctx) => String(ctx.from?.id) === String(OWNER_ID);
@@ -37,15 +42,42 @@ const adminReply = new Map(); // adminId -> ticketId
 const inflight = new Set();
 const cool = new Map();
 
+/* ---------- dedupe redelivered updates ---------- */
+const seenUpdates = new Set();
+bot.use((ctx, next) => {
+  const id = ctx.update.update_id;
+  if (seenUpdates.has(id)) return;
+  seenUpdates.add(id);
+  if (seenUpdates.size > 1000) seenUpdates.delete(seenUpdates.values().next().value);
+  return next();
+});
+
 /* ---------- force join ---------- */
+const warned = new Map();
+function warnOwner(c, msg) {
+  if (Date.now() - (warned.get(c.id) || 0) < 3600e3) return; // once per hour per channel
+  warned.set(c.id, Date.now());
+  console.warn(`Force-join check failed for ${c.id}:`, msg);
+  allAdmins().forEach((a) => bot.telegram.sendMessage(a,
+    `⚠️ Force-join check FAILED for ${c.id}\n${msg}\n\nFix: add this bot as ADMIN in that channel/group. Until then nobody is being blocked by it.`).catch(() => {}));
+}
+
+async function isMember(c, userId) {
+  const m = await bot.telegram.getChatMember(c.id, userId);
+  if (['member', 'administrator', 'creator'].includes(m.status)) return true;
+  if (m.status === 'restricted') return m.is_member !== false; // restricted users who already left are NOT members
+  return false; // left / kicked
+}
+
 async function notJoined(userId) {
   const missing = [];
   for (const c of FORCE) {
     try {
-      const m = await bot.telegram.getChatMember(c.id, userId);
-      if (!['member', 'administrator', 'creator', 'restricted'].includes(m.status)) missing.push(c);
+      if (!(await isMember(c, userId))) missing.push(c);
     } catch (e) {
-      console.warn(`Force-join check failed for ${c.id} (is the bot admin there?):`, e.message);
+      const msg = e.description || e.message || String(e);
+      if (/user not found|PARTICIPANT_ID_INVALID/i.test(msg)) { missing.push(c); continue; }
+      warnOwner(c, msg); // bot not admin / wrong id / chat not found -> tell the owner instead of failing silently
     }
   }
   return missing;
@@ -60,9 +92,9 @@ bot.use(async (ctx, next) => {
   if (ctx.callbackQuery) await ctx.answerCbQuery('Join all channels first', { show_alert: true }).catch(() => {});
   return ctx.reply(
     '🔒 Join these to use the bot, then tap the button below:',
-    Markup.inlineKeyboard([
-      ...missing.map((c) => [Markup.button.url(c.label, c.link)]),
-      [Markup.button.callback('✅ I have joined', 'joined')],
+    kbd([
+      ...missing.map((c) => [link(c.label, c.link, 'primary')]),
+      [cb('✅ I have joined', 'joined', 'success')],
     ])
   );
 });
@@ -70,13 +102,13 @@ bot.use(async (ctx, next) => {
 /* ---------- menu ---------- */
 const menu = (adm = false) => {
   const rows = [
-    [Markup.button.callback('🔎 Check Number', 'check')],
-    [Markup.button.callback('🎫 Support Ticket', 'support')],
+    [cb('🔎 Check Number', 'check', 'success')],
+    [cb('🎫 Support Ticket', 'support', 'primary')],
   ];
-  if (SUPPORT_USERNAME) rows[1].push(Markup.button.url('💬 Contact Support', `https://t.me/${SUPPORT_USERNAME}`));
-  rows.push([Markup.button.callback('ℹ️ Help', 'help')]);
-  if (adm) rows.push([Markup.button.callback('🛠 Admin Panel', 'adminpanel')]);
-  return Markup.inlineKeyboard(rows);
+  if (SUPPORT_USERNAME) rows[1].push(link('💬 Contact Support', `https://t.me/${SUPPORT_USERNAME}`, 'primary'));
+  rows.push([cb('ℹ️ Help', 'help')]);
+  if (adm) rows.push([cb('🛠 Admin Panel', 'adminpanel', 'danger')]);
+  return kbd(rows);
 };
 const WELCOME = '👻 *WhatsApp Ban Checker*\n\nCheck if a WhatsApp number is banned. Pick an option:';
 
@@ -84,7 +116,7 @@ bot.start((ctx) => { state.delete(ctx.from.id); return ctx.reply(WELCOME, { pars
 bot.command('menu', (ctx) => { state.delete(ctx.from.id); return ctx.reply(WELCOME, { parse_mode: 'Markdown', ...menu(isAdmin(ctx)) }); });
 bot.command('cancel', (ctx) => { state.delete(ctx.from.id); adminReply.delete(ctx.from.id); addAdminMode.delete(ctx.from.id); return ctx.reply('Cancelled.', menu(isAdmin(ctx))); });
 
-bot.action('joined', async (ctx) => { await ctx.answerCbQuery('✅ Verified'); return ctx.reply(WELCOME, { parse_mode: 'Markdown', ...menu() }); });
+bot.action('joined', async (ctx) => { await ctx.answerCbQuery('✅ Verified'); return ctx.reply(WELCOME, { parse_mode: 'Markdown', ...menu(isAdmin(ctx)) }); });
 bot.action('check', async (ctx) => {
   await ctx.answerCbQuery();
   state.set(ctx.from.id, 'check');
@@ -96,7 +128,7 @@ bot.action('help', async (ctx) => {
     'Send a number with country code and I check if WhatsApp accepts it.\n\n' +
     '• *active* – number can register normally\n• *banned* – WhatsApp rejected it\n• *unknown* – could not confirm\n\n' +
     'Ban type (temporary/permanent) and ban reason cannot be read from outside — use Support if you need help with a review.',
-    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Menu', 'menu')]]) }
+    { parse_mode: 'Markdown', ...kbd([[cb('⬅️ Menu', 'menu')]]) }
   );
 });
 bot.action('menu', async (ctx) => { await ctx.answerCbQuery(); return ctx.reply(WELCOME, { parse_mode: 'Markdown', ...menu(isAdmin(ctx)) }); });
@@ -111,13 +143,10 @@ bot.action('support', async (ctx) => {
 async function openTicket(ctx, text) {
   const u = ctx.from;
   const id = db.newTicket(u.id, text);
-  const body = `🎫 *Ticket #${id}*\n👤 ${u.first_name || ''} ${u.username ? '@' + u.username : ''}\n🆔 \`${u.id}\`\n\n${text}`;
-  const kb = Markup.inlineKeyboard([[
-    Markup.button.callback('↩️ Reply', `reply_${id}`),
-    Markup.button.callback('✅ Close', `close_${id}`),
-  ]]);
+  const body = `🎫 <b>Ticket #${id}</b>\n👤 ${esc(u.first_name || '')} ${u.username ? '@' + esc(u.username) : ''}\n🆔 <code>${u.id}</code>\n\n${esc(text)}`;
+  const kb = kbd([[cb('↩️ Reply', `reply_${id}`, 'primary'), cb('✅ Close', `close_${id}`, 'success')]]);
   for (const a of allAdmins()) {
-    await bot.telegram.sendMessage(a, body, { parse_mode: 'Markdown', ...kb }).catch(() => {});
+    await bot.telegram.sendMessage(a, body, { parse_mode: 'HTML', ...kb }).catch(() => {});
   }
   return id;
 }
@@ -143,10 +172,10 @@ bot.action(/^review_(\d+)$/, async (ctx) => {
 });
 
 /* ---------- admin panel ---------- */
-const panel = () => Markup.inlineKeyboard([
-  [Markup.button.callback('➕ Add Admin', 'addadmin'), Markup.button.callback('👥 List Admins', 'listadmins')],
-  [Markup.button.callback('📊 Stats', 'stats'), Markup.button.callback('📣 Broadcast', 'bchelp')],
-  [Markup.button.callback('⬅️ Menu', 'menu')],
+const panel = () => kbd([
+  [cb('➕ Add Admin', 'addadmin', 'success'), cb('👥 List Admins', 'listadmins', 'primary')],
+  [cb('📊 Stats', 'stats', 'primary'), cb('📣 Broadcast', 'bchelp', 'danger')],
+  [cb('⬅️ Menu', 'menu')],
 ]);
 const PANEL_TXT = '🛠 *Admin Panel*';
 bot.command('admin', (ctx) => isAdmin(ctx) && ctx.reply(PANEL_TXT, { parse_mode: 'Markdown', ...panel() }));
@@ -229,7 +258,7 @@ bot.on('text', async (ctx) => {
     adminReply.delete(uid);
     if (!t) return ctx.reply('Ticket not found.');
     try {
-      await bot.telegram.sendMessage(t.userId, `📩 *Support reply (Ticket #${tid})*\n\n${text}`, { parse_mode: 'Markdown' });
+      await bot.telegram.sendMessage(t.userId, `📩 <b>Support reply (Ticket #${tid})</b>\n\n${esc(text)}`, { parse_mode: 'HTML' });
       return ctx.reply(`✅ Sent to user (ticket #${tid}).`);
     } catch (_) { return ctx.reply('❌ Could not deliver (user blocked the bot).'); }
   }
@@ -251,29 +280,34 @@ bot.on('text', async (ctx) => {
   if (inflight.has(number)) return ctx.reply('Already checking that number, hold on...');
   inflight.add(number);
   const msg = await ctx.reply(`🔎 Checking +${number}...`);
+  runCheck(ctx, number, msg); // NOT awaited: handler returns now, so Telegram never re-sends the update
+});
+
+async function runCheck(ctx, number, msg) {
+  const edit = (t, extra = {}) => ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, t, extra).catch(() => {});
   try {
     const r = await ghost.check(number);
     const st = (r.status || '').toLowerCase();
-    const banned = /ban/.test(st) && !/not|no /.test(st);
+    const banned = /\bbanned\b/.test(st) && !/\bnot\s+banned\b/.test(st); // "unbanned" is NOT banned
+    const icon = banned ? '🚫' : /unban|active/.test(st) ? '✅' : '❔';
     const lines = [`📞 <code>+${number}</code>`];
-    if (r.status) lines.push(`<b>Status:</b> ${esc(r.status)}`);
+    if (r.status) lines.push(`<b>Status:</b> ${icon} ${esc(r.status)}`);
+    if (r.modban) lines.push(`<b>Modban:</b> ${esc(r.modban)}`);
     if (r.reason) lines.push(`<b>Reason:</b> ${esc(r.reason)}`);
     if (r.perma) lines.push(`<b>Perma:</b> ${esc(r.perma)}`);
     if (r.bannedAt) lines.push(`<b>Banned at:</b> ${esc(r.bannedAt)}`);
     if (!r.status) lines.push(`<pre>${esc(r.raw.slice(0, 700))}</pre>`);
     lines.push(`\nChecked at: ${stamp()}`);
-    const head = lines.join('\n');
-    const tail = '';
     const kb = banned
-      ? Markup.inlineKeyboard([[Markup.button.callback('📨 Request review', `review_${number}`)], [Markup.button.callback('⬅️ Menu', 'menu')]])
-      : Markup.inlineKeyboard([[Markup.button.callback('🔎 Check another', 'check'), Markup.button.callback('⬅️ Menu', 'menu')]]);
-    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, head + tail, { parse_mode: 'HTML', ...kb });
+      ? kbd([[cb('📨 Request review', `review_${number}`, 'primary')], [cb('⬅️ Menu', 'menu')]])
+      : kbd([[cb('🔎 Check another', 'check', 'success'), cb('⬅️ Menu', 'menu')]]);
+    await edit(lines.join('\n'), { parse_mode: 'HTML', ...kb });
   } catch (err) {
-    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, err.message === 'NOT_READY' ? '⚠️ Checker is offline right now. Try again later.' : `⚠️ Check failed: ${err.message || 'unknown error'}`);
+    await edit(err.message === 'NOT_READY' ? '⚠️ Checker is offline right now. Try again later.' : `⚠️ Check failed: ${err.message || 'unknown error'}`);
   } finally {
     inflight.delete(number);
   }
-});
+}
 
 bot.catch((err) => console.error('Bot error:', err));
 
