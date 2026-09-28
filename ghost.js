@@ -11,6 +11,8 @@ const TIMEOUT_MS = Number(process.env.GHOST_TIMEOUT_MS || 45000);
 let client = null, ghostId = null, ready = false;
 let waiter = null;             // { number, sentId, latest, settleTimer, resolve }
 let chain = Promise.resolve(); // one request at a time
+const MAX_QUEUE = Number(process.env.GHOST_MAX_QUEUE || 8);
+let pending = 0;
 
 const pick = (t, re) => (t.match(re)?.[1] || '').trim();
 
@@ -37,7 +39,8 @@ function onMessage(event) {
   const m = event.message;
   if (!m || !waiter || !ghostId) return;
   if (String(m.senderId) !== String(ghostId)) return;
-  if (waiter.sentId && m.id <= waiter.sentId) return; // old message being edited, not our answer
+  if (waiter.sentId === null) return;                 // our request not confirmed yet
+  if (m.id <= waiter.sentId) return;                  // old message being edited, not our answer
   const text = m.message || '';
   if (!/status\s*:/i.test(text)) return;               // "checking..." placeholder, wait for the result
   if (!numberMatches(text, waiter.number)) return;
@@ -76,9 +79,12 @@ async function init(notify = () => {}) {
 
 // sends "? <number>" to the checker bot and waits for its result (no retries)
 function check(number) {
+  if (!ready) return Promise.reject(new Error('NOT_READY'));
+  if (pending >= MAX_QUEUE) return Promise.reject(new Error('BUSY'));
+  pending++;
   const job = chain.then(() => new Promise((resolve, reject) => {
     if (!ready) return reject(new Error('NOT_READY'));
-    const w = { number, sentId: 0, latest: '', settleTimer: null, resolve: null };
+    const w = { number, sentId: null, latest: '', settleTimer: null, resolve: null };
     const t = setTimeout(() => {
       if (waiter === w) waiter = null;
       clearTimeout(w.settleTimer);
@@ -87,13 +93,13 @@ function check(number) {
     w.resolve = (r) => { clearTimeout(t); resolve(r); };
     waiter = w;
     client.sendMessage(GHOST, { message: '? ' + number })
-      .then((sent) => { w.sentId = sent?.id || 0; })
+      .then((sent) => { w.sentId = sent?.id ?? 0; })
       .catch((e) => {
         clearTimeout(t); clearTimeout(w.settleTimer);
         if (waiter === w) waiter = null;
         reject(e);
       });
-  }));
+  })).finally(() => { pending--; });
   chain = job.catch(() => {});
   return job;
 }

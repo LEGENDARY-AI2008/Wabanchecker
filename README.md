@@ -1,18 +1,21 @@
 # WhatsApp Ban Checker (Telegram bot)
 
-Features: number check (active/banned/unknown), force-join, support tickets (user -> admin -> reply), review requests, broadcast, /stats, inline menu.
+Send `? 2348012345678` (private or group). The bot sends the logo, then edits the caption with the result.
+
+## Groups
+1. BotFather > /setprivacy > choose the bot > **Disable** (so it can see `?` messages)
+2. Add the bot to the group and make it **admin**
+3. Anyone sends `? 234...`; if the bot is not admin it asks to be made admin. Tagging the bot shows the usage hint.
 
 ## Env vars
-Config is in `.env` (BOT_TOKEN, ADMIN_ID comma-separated for many admins, SUPPORT_USERNAME, FORCE_JOIN).
+Copy `.env.example` to `.env` (never commit it). `TIME_SHIFT_MIN=-60` shifts Ghost's "Banned at" time by 1 hour back.
 
 ## Admin
 - Tap Reply under a ticket, then type your answer
-- `/broadcast` (reply to any message, or `/broadcast text`)
-- `/stats`
+- `/broadcast` (reply to any message, or `/broadcast text`), `/stats`, `/admin`
 
 ## Deploy on Render
-1. Push this folder to GitHub
-2. Render > New > Blueprint (uses render.yaml) > fill the env vars in the dashboard
-3. Render sets RENDER_EXTERNAL_URL itself; bot switches to webhook automatically
-
-Notes: free Render wipes files on redeploy (user list resets) — add a Render Disk and set DATA_DIR=/data to keep it. Free tier also sleeps when idle; Telegram messages wake it up but first reply is slow.
+1. Push to GitHub (`.env` is git-ignored)
+2. Render > New > Blueprint > fill the env vars in the dashboard
+3. Add a Disk and set `DATA_DIR=/data` to keep user list across redeploys
+Use `TG_SESSION` in ONE place only (local or Render), or Telegram kills the session.
