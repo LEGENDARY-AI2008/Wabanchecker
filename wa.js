@@ -90,6 +90,21 @@ async function check(number) {
   return { exists: !!(hit && hit.exists) };
 }
 
+async function probe(number) {
+  if (!ready || !sock) throw new Error('NOT_LINKED');
+  const jid = `${number}@s.whatsapp.net`;
+  const out = {};
+  const t = async (name, fn) => {
+    try { out[name] = (await fn()) ?? null; }
+    catch (e) { out[name] = { error: e.message, code: e?.output?.statusCode || e?.data || null }; }
+  };
+  await t('onWhatsApp', () => sock.onWhatsApp(number));
+  await t('profilePic', () => sock.profilePictureUrl(jid, 'image'));
+  await t('about', () => sock.fetchStatus(jid));
+  await t('business', () => sock.getBusinessProfile(jid));
+  return out;
+}
+
 const status = () => ({ ready, linked: !!auth?.state?.creds?.registered });
 
-module.exports = { init, pair, unpair, check, status };
+module.exports = { init, pair, unpair, check, probe, status };

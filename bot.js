@@ -197,6 +197,16 @@ bot.command('wastatus', (ctx) => {
   const s = wa.status();
   return ctx.reply(`WhatsApp checker: ${s.ready ? '🟢 online' : s.linked ? '🟡 linked, connecting' : '🔴 not linked (use /pair)'}`);
 });
+bot.command('probe', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const n = cleanNumber(ctx.message.text.split(/\s+/)[1] || '');
+  if (n.length < 8) return ctx.reply('Usage: /probe 2348012345678');
+  try {
+    const r = await wa.probe(n);
+    const txt = JSON.stringify(r, (k, v) => (typeof v === 'string' && v.length > 90 ? v.slice(0, 90) + '…' : v), 1);
+    return ctx.reply(txt.slice(0, 3800));
+  } catch (e) { return ctx.reply('❌ ' + e.message); }
+});
 bot.command('unpair', async (ctx) => {
   if (!isOwner(ctx)) return;
   await wa.unpair();
@@ -276,8 +286,8 @@ bot.on('text', async (ctx) => {
   try {
     const r = await wa.check(number);
     const banned = !r.exists;
-    const head = `📞 \`+${number}\`\nStatus: *${banned ? 'banned / not on WhatsApp' : 'active'}*\n`;
-    const tail = `Checked at: ${stamp()}\n\n_${banned ? 'WhatsApp reports no account for this number (banned or never registered).' : 'This number has an active WhatsApp account.'}_`;
+    const head = `📞 \`+${number}\`\nStatus: *${banned ? 'not on WhatsApp' : 'registered'}*\n`;
+    const tail = `Checked at: ${stamp()}\n\n_${banned ? 'WhatsApp reports no account for this number (banned or never registered).' : 'This number has a WhatsApp account. This check cannot confirm whether it is banned.'}_`;
     const kb = banned
       ? Markup.inlineKeyboard([[Markup.button.callback('📨 Request review', `review_${number}`)], [Markup.button.callback('⬅️ Menu', 'menu')]])
       : Markup.inlineKeyboard([[Markup.button.callback('🔎 Check another', 'check'), Markup.button.callback('⬅️ Menu', 'menu')]]);
