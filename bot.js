@@ -1,7 +1,8 @@
 require('dotenv').config();
 const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
-const wa = require('./wa');
+const ghost = require('./ghost');
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const cleanNumber = (s) => String(s).replace(/[^0-9]/g, '');
 const db = require('./db');
 
@@ -180,39 +181,6 @@ bot.command('removeadmin', (ctx) => {
   return ctx.reply(`Removed ${id}.`);
 });
 
-/* ---------- WhatsApp checker link (admin) ---------- */
-bot.command('pair', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const n = cleanNumber(ctx.message.text.split(/\s+/)[1] || '');
-  if (n.length < 8) return ctx.reply('Usage: /pair 2348012345678  (the spare WhatsApp number, with country code)');
-  await ctx.reply('⏳ Requesting pairing code...');
-  try {
-    const code = await wa.pair(n);
-    const pretty = String(code).match(/.{1,4}/g).join('-');
-    return ctx.reply(`🔗 Code: \`${pretty}\`\n\nOn that phone: WhatsApp > Linked devices > Link a device > *Link with phone number instead* > enter the code.`, { parse_mode: 'Markdown' });
-  } catch (e) { return ctx.reply('❌ ' + e.message); }
-});
-bot.command('wastatus', (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const s = wa.status();
-  return ctx.reply(`WhatsApp checker: ${s.ready ? '🟢 online' : s.linked ? '🟡 linked, connecting' : '🔴 not linked (use /pair)'}`);
-});
-bot.command('probe', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  const n = cleanNumber(ctx.message.text.split(/\s+/)[1] || '');
-  if (n.length < 8) return ctx.reply('Usage: /probe 2348012345678');
-  try {
-    const r = await wa.probe(n);
-    const txt = JSON.stringify(r, (k, v) => (typeof v === 'string' && v.length > 90 ? v.slice(0, 90) + '…' : v), 1);
-    return ctx.reply(txt.slice(0, 3800));
-  } catch (e) { return ctx.reply('❌ ' + e.message); }
-});
-bot.command('unpair', async (ctx) => {
-  if (!isOwner(ctx)) return;
-  await wa.unpair();
-  return ctx.reply('Unlinked. Use /pair to link a number again.');
-});
-
 /* ---------- admin tools ---------- */
 bot.command('stats', (ctx) => isAdmin(ctx) && ctx.reply(`👥 Users: ${db.count()}\n🎫 Open tickets: ${db.openTickets()}`));
 
@@ -284,16 +252,24 @@ bot.on('text', async (ctx) => {
   inflight.add(number);
   const msg = await ctx.reply(`🔎 Checking +${number}...`);
   try {
-    const r = await wa.check(number);
-    const banned = !r.exists;
-    const head = `📞 \`+${number}\`\nStatus: *${banned ? 'not on WhatsApp' : 'registered'}*\n`;
-    const tail = `Checked at: ${stamp()}\n\n_${banned ? 'WhatsApp reports no account for this number (banned or never registered).' : 'This number has a WhatsApp account. This check cannot confirm whether it is banned.'}_`;
+    const r = await ghost.check(number);
+    const st = (r.status || '').toLowerCase();
+    const banned = /ban/.test(st) && !/not|no /.test(st);
+    const lines = [`📞 <code>+${number}</code>`];
+    if (r.status) lines.push(`<b>Status:</b> ${esc(r.status)}`);
+    if (r.reason) lines.push(`<b>Reason:</b> ${esc(r.reason)}`);
+    if (r.perma) lines.push(`<b>Perma:</b> ${esc(r.perma)}`);
+    if (r.bannedAt) lines.push(`<b>Banned at:</b> ${esc(r.bannedAt)}`);
+    if (!r.status) lines.push(`<pre>${esc(r.raw.slice(0, 700))}</pre>`);
+    lines.push(`\nChecked at: ${stamp()}`);
+    const head = lines.join('\n');
+    const tail = '';
     const kb = banned
       ? Markup.inlineKeyboard([[Markup.button.callback('📨 Request review', `review_${number}`)], [Markup.button.callback('⬅️ Menu', 'menu')]])
       : Markup.inlineKeyboard([[Markup.button.callback('🔎 Check another', 'check'), Markup.button.callback('⬅️ Menu', 'menu')]]);
-    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, head + tail, { parse_mode: 'Markdown', ...kb });
+    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, head + tail, { parse_mode: 'HTML', ...kb });
   } catch (err) {
-    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, err.message === 'NOT_LINKED' ? '⚠️ Checker is offline right now. Try again later.' : `⚠️ Check failed: ${err.message || 'unknown error'}`);
+    await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, undefined, err.message === 'NOT_READY' ? '⚠️ Checker is offline right now. Try again later.' : `⚠️ Check failed: ${err.message || 'unknown error'}`);
   } finally {
     inflight.delete(number);
   }
@@ -304,10 +280,7 @@ bot.catch((err) => console.error('Bot error:', err));
 /* ---------- start (webhook on Render, polling locally) ---------- */
 (async () => {
   await db.init();
-  await wa.init((ev) => {
-    const msg = ev === 'open' ? '🟢 WhatsApp checker is online.' : '🔴 WhatsApp checker was logged out. Use /pair to link again.';
-    allAdmins().forEach((a) => bot.telegram.sendMessage(a, msg).catch(() => {}));
-  });
+  ghost.init((msg) => allAdmins().forEach((a) => bot.telegram.sendMessage(a, msg).catch(() => {}))).catch((e) => console.error(e));
   if (RENDER_EXTERNAL_URL) {
     const hookPath = `/tg/${BOT_TOKEN.replace(/[^A-Za-z0-9]/g, '').slice(-32)}`;
     const handler = bot.webhookCallback(hookPath);
