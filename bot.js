@@ -8,7 +8,7 @@ const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const cleanNumber = (s) => String(s).replace(/[^0-9]/g, '');
 const db = require('./db');
 
-const { BOT_TOKEN, RENDER_EXTERNAL_URL, PORT = 3000 } = process.env;
+const { BOT_TOKEN, RENDER_EXTERNAL_URL, PORT = 3000, API_KEY } = process.env;
 const ADMIN_IDS = (process.env.ADMIN_ID || '').split(',').map((s) => s.trim()).filter(Boolean);
 const OWNER_ID = ADMIN_IDS[0];
 const SUPPORT_USERNAME = (process.env.SUPPORT_USERNAME || '').replace('@', '');
@@ -402,22 +402,86 @@ async function runCheck(ctx, number, card, inGroup) {
 
 bot.catch((err) => console.error('Bot error:', err));
 
+/* ---------- public HTTP API (for the mobile app) ---------- */
+const apiCool = new Map(); // ip -> last check time
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => { data += c; if (data.length > 1e5) req.destroy(); });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(body);
+}
+async function handleApiCheck(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, x-api-key',
+    });
+    return res.end();
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'POST only' });
+  if (API_KEY && req.headers['x-api-key'] !== API_KEY) return sendJson(res, 401, { ok: false, error: 'invalid api key' });
+
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  if (now - (apiCool.get(ip) || 0) < 4000) return sendJson(res, 429, { ok: false, error: 'slow down, wait a few seconds' });
+  apiCool.set(ip, now);
+
+  let body;
+  try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }); }
+  const number = cleanNumber(body.number || '');
+  if (number.length < 8 || number.length > 15) return sendJson(res, 400, { ok: false, error: 'number must be 8-15 digits, with country code' });
+
+  try {
+    const r = await ghost.check(number);
+    const st = (r.status || '').toLowerCase();
+    const banned = /\bbanned\b/.test(st) && !/\bnot\s+banned\b/.test(st);
+    return sendJson(res, 200, {
+      ok: true,
+      number,
+      banned,
+      status: r.status || null,
+      modban: r.modban || null,
+      reason: r.reason || null,
+      perma: r.perma || null,
+      bannedAt: r.bannedAt ? shiftTime(r.bannedAt) : null,
+      checkedAt: stamp(),
+    });
+  } catch (err) {
+    const msg = err.message === 'NOT_READY' ? 'Checker is offline right now. Try again later.'
+      : err.message === 'BUSY' ? 'Too many checks running. Try again in a minute.'
+      : err.message || 'Check failed';
+    return sendJson(res, 503, { ok: false, error: msg });
+  }
+}
+
 /* ---------- start (webhook on Render, polling locally) ---------- */
 (async () => {
   await db.init();
   ME = await bot.telegram.getMe();
   ghost.init((msg) => allAdmins().forEach((a) => bot.telegram.sendMessage(a, msg).catch(() => {}))).catch((e) => console.error(e));
+  const server = (req, res) => {
+    if (req.url === '/api/check') return handleApiCheck(req, res);
+    res.writeHead(200); res.end('ok');
+  };
   if (RENDER_EXTERNAL_URL) {
     const hookPath = `/tg/${BOT_TOKEN.replace(/[^A-Za-z0-9]/g, '').slice(-32)}`;
     const handler = bot.webhookCallback(hookPath);
     http.createServer((req, res) => {
       if (req.method === 'POST' && req.url === hookPath) return handler(req, res);
-      res.writeHead(200); res.end('ok');
+      return server(req, res);
     }).listen(PORT);
     await bot.telegram.setWebhook(`${RENDER_EXTERNAL_URL}${hookPath}`);
     console.log('Webhook set, listening on', PORT);
   } else {
-    http.createServer((_, res) => { res.writeHead(200); res.end('ok'); }).listen(PORT);
+    http.createServer(server).listen(PORT);
     await bot.launch();
     console.log('Polling...');
   }
