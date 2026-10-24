@@ -8,7 +8,7 @@ Send `? 2348012345678` (private or group). The bot sends the logo, then edits th
 3. Anyone sends `? 234...`; if the bot is not admin it asks to be made admin. Tagging the bot shows the usage hint.
 
 ## Env vars
-Copy `.env.example` to `.env` (never commit it). `TIME_SHIFT_MIN=-60` shifts Ghost's "Banned at" time by 1 hour back.
+Copy `.env.example` to `.env` (never commit it). Set `BANCHECK_API_KEY` to your BanCheck API key (live key). "Banned at" and "Checked at" are shown in Nigeria time (Africa/Lagos).
 
 ## Admin
 - Tap Reply under a ticket, then type your answer
@@ -18,4 +18,3 @@ Copy `.env.example` to `.env` (never commit it). `TIME_SHIFT_MIN=-60` shifts Gho
 1. Push to GitHub (`.env` is git-ignored)
 2. Render > New > Blueprint > fill the env vars in the dashboard
 3. Add a Disk and set `DATA_DIR=/data` to keep user list across redeploys
-Use `TG_SESSION` in ONE place only (local or Render), or Telegram kills the session.

@@ -3,7 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
-const ghost = require('./ghost');
+const ghost = require('./bancheck'); // own BanCheck API (was ./ghost)
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const cleanNumber = (s) => String(s).replace(/[^0-9]/g, '');
 const db = require('./db');
@@ -46,7 +46,6 @@ const cool = new Map();
 const LOGO_PATH = path.join(__dirname, 'logo.jpg');
 let ME = null;       // bot info (id, username)
 let LOGO_ID = null;  // cached Telegram file_id of the logo after first upload
-const SHIFT_MIN = Number(process.env.TIME_SHIFT_MIN ?? -60); // shift Ghost's "Banned at" time (minutes)
 
 /* ---------- dedupe redelivered updates ---------- */
 const seenUpdates = new Set();
@@ -285,31 +284,13 @@ bot.on('text', async (ctx) => {
   return startCheck(ctx, number, false);
 });
 
-/* ---------- "? number" parsing, time shift ---------- */
+/* ---------- "? number" parsing ---------- */
 const QRE = /^\?\s*\+?\s*(\d[\d\s\-().]{6,})/;
 function parseQuery(text) {
   const m = text.match(QRE);
   if (!m) return null;
   const n = cleanNumber(m[1]);
   return n.length >= 8 && n.length <= 15 ? n : null;
-}
-
-const p2 = (n) => String(n).padStart(2, '0');
-function shiftTime(str) {
-  if (!SHIFT_MIN) return str;
-  let y, mo, d, h, mi, sec, out;
-  let m = str.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (m) {
-    y = +m[1]; mo = +m[2]; d = +m[3]; h = +m[4]; mi = +m[5]; sec = m[6] ? +m[6] : null;
-    out = (t, s2) => `${t.getUTCFullYear()}-${p2(t.getUTCMonth() + 1)}-${p2(t.getUTCDate())} ${p2(t.getUTCHours())}:${p2(t.getUTCMinutes())}${s2 ? ':' + p2(t.getUTCSeconds()) : ''}`;
-  } else if ((m = str.match(/(\d{1,2})([./-])(\d{1,2})[./-](\d{4})([,\s]+)(\d{1,2})([.:])(\d{2})(?:[.:](\d{2}))?/))) {
-    // e.g. 27.09.2026 23.10  or  28/09/2026, 12:29  (keeps Ghost's own separators)
-    d = +m[1]; mo = +m[3]; y = +m[4]; h = +m[6]; mi = +m[8]; sec = m[9] ? +m[9] : null;
-    const ds = m[2], gap = m[5], ts = ':'; // time always uses ':'
-    out = (t, s2) => `${p2(t.getUTCDate())}${ds}${p2(t.getUTCMonth() + 1)}${ds}${t.getUTCFullYear()}${gap}${p2(t.getUTCHours())}${ts}${p2(t.getUTCMinutes())}${s2 ? ts + p2(t.getUTCSeconds()) : ''}`;
-  } else return str; // unknown format: show as Ghost gave it
-  const t = new Date(Date.UTC(y, mo - 1, d, h, mi, sec || 0) + SHIFT_MIN * 60000);
-  return out(t, sec !== null);
 }
 
 /* ---------- groups ---------- */
@@ -383,7 +364,7 @@ async function runCheck(ctx, number, card, inGroup) {
     if (r.modban) rows.push(`Modban: ${esc(r.modban)}`);
     if (r.reason) rows.push(`Reason: ${esc(r.reason)}`);
     if (r.perma) rows.push(`Perma: ${esc(r.perma)}`);
-    if (r.bannedAt) rows.push(`Banned at: ${esc(shiftTime(r.bannedAt))}`);
+    if (r.bannedAt) rows.push(`Banned at: ${esc(r.bannedAt)}`);
     const body = r.status ? `<blockquote>${rows.join('\n')}</blockquote>` : `<pre>${esc(r.raw.slice(0, 700))}</pre>`;
     const review = banned ? [[cb('📨 Request review', `review_${number}`, 'primary')]] : [];
     const kb = inGroup
@@ -451,7 +432,7 @@ async function handleApiCheck(req, res) {
       modban: r.modban || null,
       reason: r.reason || null,
       perma: r.perma || null,
-      bannedAt: r.bannedAt ? shiftTime(r.bannedAt) : null,
+      bannedAt: r.bannedAt || null,
       checkedAt: stamp(),
     });
   } catch (err) {
